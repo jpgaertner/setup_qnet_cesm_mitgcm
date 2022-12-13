@@ -20,10 +20,12 @@ import os
 import h5netcdf
 import netCDF4
 
+import versis
+import versis.constants as ct
+import versis.flux_atmOcn_atmIce_new as flux_cesm
+import versis.flux_MITgcm_LANL as flux_mitgcm
+
 import veros.tools
-import veros.tools.constants as ct
-import veros.tools.flux_atmOcn_atmIce as flux_cesm
-import veros.tools.flux_MITgcm_LANL as flux_mitgcm
 from veros import VerosSetup, veros_routine, veros_kernel, KernelOutput, logger
 from veros.variables import Variable
 from veros.core.operators import numpy as npx, update, at
@@ -33,6 +35,9 @@ DATA_FILES = veros.tools.get_assets("global_4deg", os.path.join(BASE_PATH, "asse
 
 
 class GlobalFourDegreeSetup(VerosSetup):
+
+    __veros_plugins__ = (versis,)
+
     """Global 4 degree model with 15 vertical levels.
 
     This setup demonstrates:
@@ -40,7 +45,6 @@ class GlobalFourDegreeSetup(VerosSetup):
      - reading input data from external files
      - including Indonesian throughflow
      - implementing surface forcings
-     - applying a simple ice mask
 
     `Adapted from pyOM2 <https://wiki.cen.uni-hamburg.de/ifm/TO/pyOM2/4x4%20global%20model>`_.
 
@@ -64,7 +68,7 @@ class GlobalFourDegreeSetup(VerosSetup):
 
         settings.dt_mom = 1800.0
         settings.dt_tracer = 86400.0
-        settings.runlen = settings.dt_tracer * 10 # * 360 * 10
+        settings.runlen = settings.dt_tracer * 360 # * 360 * 10
 
         settings.x_origin = 4.0
         settings.y_origin = -76.0
@@ -151,6 +155,22 @@ class GlobalFourDegreeSetup(VerosSetup):
             v10m=Variable("v10m", forc_dim, "", "", time_dependent=False),
             q10m=Variable("q10m", forc_dim, "", "", time_dependent=False),
             t2m=Variable("t2m", forc_dim, "", "", time_dependent=False),
+            # versis
+            uWind_f = Variable("Zonal wind velocity", forc_dim, "m/s"),
+            vWind_f = Variable("Meridional wind velocity", forc_dim, "m/s"),
+            SWdown_f = Variable("Downward shortwave radiation", forc_dim, "W/m2"),
+            LWdown_f = Variable("Downward longwave radiation", forc_dim, "W/m2"),
+            ATemp_f = Variable("Atmospheric temperature", forc_dim, "K"),
+            aqh_f = Variable("Atmospheric specific humidity", forc_dim, "g/kg"),
+            precip_f = Variable("Precipitation rate", forc_dim, "m/s"),
+            snowfall_f = Variable("Snowfall rate", forc_dim, "m/s"),
+            evap_f = Variable("Evaporation", forc_dim, "m"),
+            surfPress_f = Variable("Surface pressure", forc_dim, "P"),
+            #
+            qnet_ = Variable("qnet", hor_dim, ""),
+            lwnet_=Variable("lwnet", hor_dim, ""),
+            sen_=Variable("sen", hor_dim, ""),
+            lat_=Variable("lat", hor_dim, ""),
         )
 
     def _read_forcing(self, var):
@@ -302,6 +322,23 @@ class GlobalFourDegreeSetup(VerosSetup):
             "v10m",
             "q10m",
             "t2m",
+            # versis forcing
+            "uWind_f","vWind_f",
+            "SWdown_f","LWdown_f",
+            "ATemp_f","aqh_f",
+            "precip_f","snowfall_f","evap_f",
+            "surfPress_f",
+            # versis masks and grid (and veros ones to be copied to versis)
+            "maskT","maskU","maskV",
+            "iceMask","iceMaskU","iceMaskV","maskInC","maskInU","maskInV",
+            "coriolis_t","fCori",
+            "R_low","ht",
+            "dxt","dyt","dxu","dyu",
+            "dxC","dyC","dxU","dyU","dxG","dyG","dxV","dyV",
+            "recip_dxC","recip_dyC","recip_dxG","recip_dyG","recip_dxU","recip_dyU","recip_dxV","recip_dyV",
+            "area_t","area_u","area_v",
+            "rA","rAu","rAv","rAz",
+            "recip_rA","recip_rAu","recip_rAv","recip_rAz",
         ],
     )
     def set_initial_conditions(self, state):
@@ -342,12 +379,7 @@ class GlobalFourDegreeSetup(VerosSetup):
         hybi = self._read_forcing_legacy('hybi', "era5_ml")[-3:]
         hyam = self._read_forcing_legacy('hyam', "era5_ml")[-2:]   # L136-L137
         hybm = self._read_forcing_legacy('hybm', "era5_ml")[-2:]   # L136-L137
-        # Replace with prognostic sea-ice from Veros
-        vs.siconc = update(vs.siconc, at[2:-2, 2:-2, :],
-                           veros.tools.interpolate(forc_time_xygrid,
-                           self._read_forcing_legacy('siconc', "era5_sfc", flip_y=True),
-                           time_xygrid)
-        )
+
         #-------------------
         lnsp = veros.tools.interpolate(forc_time_xygrid,
                                        self._read_forcing_legacy('lnsp', "era5_ml", flip_y=True)[..., 0, :],   # L136
@@ -449,6 +481,71 @@ class GlobalFourDegreeSetup(VerosSetup):
                 vs.forc_iw_surface, at[2:-2, 2:-2], self._read_forcing("wind_energy") / settings.rho_0 * 0.2
             )
 
+        ##### versis #####
+
+        # read forcing data, interpolate it to veros grid and update the variable
+        def read_int_update(field, var_read, file):
+            if file == 'ml':
+                read = self._read_forcing_legacy(var_read, 'era5_ml', flip_y=True)[:,:,1,:]
+            elif file == 'sfc':
+                read = self._read_forcing_legacy(var_read, 'era5_sfc', flip_y=True)
+            read_int = veros.tools.interpolate(forc_time_xygrid, read, time_xygrid)
+            field_out = update(field, at[2:-2,2:-2], read_int)
+
+            return field_out
+
+        # forcing fields
+        vs.uWind_f = read_int_update(vs.uWind_f, 'u', 'ml') # [m/s]
+        vs.vWind_f = read_int_update(vs.vWind_f, 'v', 'ml') # [m/s]
+        vs.SWdown_f = read_int_update(vs.SWdown_f, 'msdwswrf', 'sfc') # [W/m2]
+        vs.LWdown_f = read_int_update(vs.LWdown_f, 'msdwlwrf', 'sfc') # [W/m2]
+        vs.ATemp_f = read_int_update(vs.ATemp_f, 't', 'ml') # [K]
+        vs.aqh_f = read_int_update(vs.aqh_f, 'q', 'ml') # [kg/kg]
+        rhoWater = 1000
+        vs.precip_f = ( read_int_update(vs.precip_f, 'crr', 'sfc') + read_int_update(vs.precip_f, 'lsrr', 'sfc') ) / rhoWater # [m/s]
+        vs.snowfall_f = ( read_int_update(vs.snowfall_f, 'csfr', 'sfc') + read_int_update(vs.snowfall_f, 'lssfr', 'sfc') ) / rhoWater # [m/s]
+        vs.evap_f = read_int_update(vs.evap_f, 'e', 'sfc') / 86400 # [m/s]
+        vs.surfPress_f = read_int_update(vs.surfPress_f, 'sp', 'sfc') # [Pa]
+
+        # masks
+        vs.iceMask = vs.maskT[:,:,-1]
+        vs.iceMaskU = vs.maskU[:,:,-1]
+        vs.iceMaskV = vs.maskV[:,:,-1]
+        vs.maskInC = vs.iceMask
+        vs.maskInU = vs.iceMaskU
+        vs.maskInV = vs.iceMaskV
+
+        # grid
+        vs.R_low = vs.ht
+        vs.fCori = vs.coriolis_t
+        ones2d = npx.ones_like(vs.maskInC)
+        vs.dxC = ones2d * vs.dxt[:,npx.newaxis]
+        vs.dyC = ones2d * vs.dyt
+        vs.dxU = ones2d * vs.dxu[:,npx.newaxis]
+        vs.dyU = ones2d * vs.dyu
+        vs.dxG = 0.5 * (vs.dxU + npx.roll(vs.dxU,1,1))
+        vs.dyG = 0.5 * (vs.dyU + npx.roll(vs.dyU,1,0))
+        vs.dxV = 0.5 * (vs.dxC + npx.roll(vs.dxC,1,1))
+        vs.dyV = 0.5 * (vs.dyC + npx.roll(vs.dyC,1,0))
+        vs.rA = vs.area_t
+        vs.rAu = vs.area_u
+        vs.rAv = vs.area_v
+        vs.rAz = vs.rA + npx.roll(vs.rA,1,0)
+        vs.rAz = 0.25 * npx.roll(vs.rAz,1,1)
+
+        vs.recip_dxC = 1 / vs.dxC
+        vs.recip_dyC = 1 / vs.dyC
+        vs.recip_dxG = 1 / vs.dxG
+        vs.recip_dyG = 1 / vs.dyG
+        vs.recip_dxU = 1 / vs.dxU
+        vs.recip_dyU = 1 / vs.dyU
+        vs.recip_dxV = 1 / vs.dxV
+        vs.recip_dyV = 1 / vs.dyV
+        vs.recip_rA  = 1 / vs.rA
+        vs.recip_rAu = 1 / vs.rAu
+        vs.recip_rAv = 1 / vs.rAv
+        vs.recip_rAz = 1 / vs.rAz
+
     @veros_routine
     def set_forcing(self, state):
         vs = state.variables
@@ -461,7 +558,9 @@ class GlobalFourDegreeSetup(VerosSetup):
         state.diagnostics["snapshot"].output_variables += ["zbot", "spres",
             "ubot", "vbot", "tcc", "qbot", "rbot", "tbot", "thbot",
             "swr_net", "lwr_dw", "siconc", "maskI", "qnet_forc", "qnec_forc",
-            "lwnet", "sen", "lat", "taux_forc", "tauy_forc", "maskT_noI"]
+            "lwnet", "sen", "lat", "taux_forc", "tauy_forc", "maskT_noI",
+            "hIceMean","hSnowMean","Area","uIce","vIce","forc_salt_surface",
+            "qnet_","lwnet_","sen_","lat_"]
         state.diagnostics["overturning"].output_frequency = 360 * 86400.0
         state.diagnostics["overturning"].sampling_frequency = settings.dt_tracer
         state.diagnostics["energy"].output_frequency = 360 * 86400.0
@@ -485,6 +584,10 @@ def set_forcing_kernel(state):
     year_in_seconds = 360 * 86400.0
     (n1, f1), (n2, f2) = veros.tools.get_periodic_interval(vs.time, year_in_seconds, year_in_seconds / 12.0, 12)
 
+    # interpolate the monthly mean data to the value at the current time step
+    def current_value(field):
+        return f1 * field[:, :, n1] + f2 * field[:, :, n2]
+
     # --------------------------------------------------------
     use_cesm_forcing = False #!!!!!
     use_mitgcm_forcing = True
@@ -502,7 +605,8 @@ def set_forcing_kernel(state):
     lwr_dw = f1 * vs.lwr_dw[:, :, n1] + f2 * vs.lwr_dw[:, :, n2]
     maskI = f1 * vs.maskI[:, :, n1] + f2 * vs.maskI[:, :, n2]
 
-    maskT_noI = vs.maskT[:, :, -1].copy()
+    maskI = npx.where(vs.Area > 0.5, 1, 0)
+
     maskT_noI = npx.where(maskI == 1, 0, vs.maskT[:, :, -1])
     temp = vs.temp[:, :, -1, vs.tau] + 273.12
 
@@ -539,7 +643,6 @@ def set_forcing_kernel(state):
                                                     vs.v[:, :, -1, vs.tau])
         # --------------------------------------------------------
     elif not use_cesm_forcing and use_mitgcm_forcing:
-        mask_ocn_ice = vs.maskT[:, :, -1].copy()
         mask_ocn_ice = npx.where(maskI == 1, 2, vs.maskT[:, :, -1])
         # mask_ocn = npx.where(maskS == 1, 3, vs.maskT[:, :, -1]) for snow
 
@@ -602,19 +705,29 @@ def set_forcing_kernel(state):
         qnec = f1 * vs.qnec[:, :, n1] + f2 * vs.qnec[:, :, n2]
         qnet = f1 * vs.qnet[:, :, n1] + f2 * vs.qnet[:, :, n2]
 
-    vs.forc_temp_surface = (
+    forc_temp_surface = (
         (qnet + qnec * (sst - vs.temp[:, :, -1, vs.tau])) * vs.maskT[:, :, -1] / cp_0 / settings.rho_0
     )
 
-    # salinity restoring
-    t_rest = 30 * 86400.0
-    sss = f1 * vs.sss_clim[:, :, n1] + f2 * vs.sss_clim[:, :, n2]
-    vs.forc_salt_surface = 1.0 / t_rest * (sss - vs.salt[:, :, -1, vs.tau]) * vs.maskT[:, :, -1] * vs.dzt[-1]
+    vs.forc_temp_surface = update(vs.forc_temp_surface, at[2:-2,2:-2], forc_temp_surface[2:-2,2:-2])
 
-    # apply simple ice mask
-    mask = npx.logical_and(vs.temp[:, :, -1, vs.tau] * vs.maskT[:, :, -1] < -1.8, vs.forc_temp_surface < 0.0)
-    vs.forc_temp_surface = npx.where(mask, 0.0, vs.forc_temp_surface)
-    vs.forc_salt_surface = npx.where(mask, 0.0, vs.forc_salt_surface)
+
+    # the salt flux is calculated in the growth routine of versis
+
+
+    ##### versis #####
+
+    vs.uWind     = current_value(vs.uWind_f)
+    vs.vWind     = current_value(vs.vWind_f)
+    vs.wSpeed    = npx.sqrt(vs.uWind**2 + vs.vWind**2)
+    vs.SWdown    = current_value(vs.SWdown_f)
+    vs.LWdown    = current_value(vs.LWdown_f)
+    vs.ATemp     = current_value(vs.ATemp_f)
+    vs.aqh       = current_value(vs.aqh_f)
+    vs.precip    = current_value(vs.precip_f)
+    vs.snowfall  = current_value(vs.snowfall_f)
+    vs.evap      = current_value(vs.evap_f)
+    vs.surfPress = current_value(vs.surfPress_f)
 
     if use_cesm_forcing and not use_mitgcm_forcing:
         KO = KernelOutput(
@@ -623,6 +736,10 @@ def set_forcing_kernel(state):
             lwnet=ocn_lwnet+ice_lwdw+ice_lwup,
             sen=ocn_sen+ice_sen,
             lat=ocn_lat+ice_lat,
+            qnet_ = qnet,
+            lwnet_ = ocn_lwnet+ice_lwdw+ice_lwup,
+            sen_ = ocn_sen+ice_sen,
+            lat_ = ocn_lat+ice_lat,
             taux_forc=ocn_taux+ice_taux,
             tauy_forc=ocn_tauy+ice_tauy,
             maskT_noI=maskT_noI,
@@ -639,6 +756,10 @@ def set_forcing_kernel(state):
             lwnet=lwr_dw-lwup,
             sen=sen,
             lat=lat,
+            qnet_ = qnet,
+            lwnet_ = lwr_dw-lwup,
+            sen_ = sen,
+            lat_ = lat,
             taux_forc=taux,
             tauy_forc=tauy,
             maskT_noI=maskT_noI,
@@ -652,6 +773,7 @@ def set_forcing_kernel(state):
         KO = KernelOutput(
             qnet_forc=qnet,
             qnec_forc=qnec,
+            qnet_ = qnet,
             surface_taux=vs.surface_taux,
             surface_tauy=vs.surface_tauy,
             forc_tke_surface=vs.forc_tke_surface,
