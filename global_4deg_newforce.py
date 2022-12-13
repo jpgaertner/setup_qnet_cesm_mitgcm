@@ -560,7 +560,8 @@ class GlobalFourDegreeSetup(VerosSetup):
             "swr_net", "lwr_dw", "siconc", "maskI", "qnet_forc", "qnec_forc",
             "lwnet", "sen", "lat", "taux_forc", "tauy_forc", "maskT_noI",
             "hIceMean","hSnowMean","Area","uIce","vIce","forc_salt_surface",
-            "qnet_","lwnet_","sen_","lat_"]
+            "qnet_","lwnet_","sen_","lat_",
+            "iceMask","evap","precip","runoff","AreapreTH"]
         state.diagnostics["overturning"].output_frequency = 360 * 86400.0
         state.diagnostics["overturning"].sampling_frequency = settings.dt_tracer
         state.diagnostics["energy"].output_frequency = 360 * 86400.0
@@ -748,6 +749,17 @@ def set_forcing_kernel(state):
             forc_tke_surface=vs.forc_tke_surface,
             forc_temp_surface=vs.forc_temp_surface,
             forc_salt_surface=vs.forc_salt_surface,
+            uWind = vs.uWind,
+            vWind = vs.vWind,
+            wSpeed = vs.wSpeed,
+            SWdown = vs.SWdown,
+            LWdown = vs.LWdown,
+            ATemp = vs.ATemp,
+            aqh = vs.aqh,
+            precip = vs.precip,
+            snowfall = vs.snowfall,
+            evap = vs.evap,
+            surfPress = vs.surfPress,
         )
     elif not use_cesm_forcing and use_mitgcm_forcing:
         KO = KernelOutput(
@@ -768,6 +780,17 @@ def set_forcing_kernel(state):
             forc_tke_surface=vs.forc_tke_surface,
             forc_temp_surface=vs.forc_temp_surface,
             forc_salt_surface=vs.forc_salt_surface,
+            uWind = vs.uWind,
+            vWind = vs.vWind,
+            wSpeed = vs.wSpeed,
+            SWdown = vs.SWdown,
+            LWdown = vs.LWdown,
+            ATemp = vs.ATemp,
+            aqh = vs.aqh,
+            precip = vs.precip,
+            snowfall = vs.snowfall,
+            evap = vs.evap,
+            surfPress = vs.surfPress,
         )
     else:
         KO = KernelOutput(
@@ -779,6 +802,17 @@ def set_forcing_kernel(state):
             forc_tke_surface=vs.forc_tke_surface,
             forc_temp_surface=vs.forc_temp_surface,
             forc_salt_surface=vs.forc_salt_surface,
+            uWind = vs.uWind,
+            vWind = vs.vWind,
+            wSpeed = vs.wSpeed,
+            SWdown = vs.SWdown,
+            LWdown = vs.LWdown,
+            ATemp = vs.ATemp,
+            aqh = vs.aqh,
+            precip = vs.precip,
+            snowfall = vs.snowfall,
+            evap = vs.evap,
+            surfPress = vs.surfPress,
         )
 
     return KO
