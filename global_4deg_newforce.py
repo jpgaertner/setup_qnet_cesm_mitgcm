@@ -21,9 +21,11 @@ import h5netcdf
 import netCDF4
 
 import versis
+
 import versis.constants as ct
 import versis.flux_atmOcn_atmIce_new as flux_cesm
 import versis.flux_MITgcm_LANL as flux_mitgcm
+from versis.growth import calc_growth
 
 import veros.tools
 from veros import VerosSetup, veros_routine, veros_kernel, KernelOutput, logger
@@ -68,7 +70,7 @@ class GlobalFourDegreeSetup(VerosSetup):
 
         settings.dt_mom = 1800.0
         settings.dt_tracer = 86400.0
-        settings.runlen = settings.dt_tracer * 360 # * 360 * 10
+        settings.runlen = settings.dt_tracer * 360
 
         settings.x_origin = 4.0
         settings.y_origin = -76.0
@@ -167,11 +169,21 @@ class GlobalFourDegreeSetup(VerosSetup):
             evap_f = Variable("Evaporation", forc_dim, "m"),
             surfPress_f = Variable("Surface pressure", forc_dim, "P"),
             #
-            qnet_ = Variable("qnet", hor_dim, ""),
             lwnet_=Variable("lwnet", hor_dim, ""),
             sen_=Variable("sen", hor_dim, ""),
             lat_=Variable("lat", hor_dim, ""),
-        )
+            Qnet_before_ice = Variable("Qnet before ice growth", hor_dim, "W/m2"),
+            ocn_lwnet = Variable("", hor_dim, ""),
+            ice_lwdw = Variable("", hor_dim, ""),
+            ice_lwup = Variable("", hor_dim, ""),
+            ocn_sen = Variable("", hor_dim, ""),
+            ocn_lat = Variable("", hor_dim, ""),
+            ice_sen = Variable("", hor_dim, ""),
+            ice_lat = Variable("", hor_dim, ""),
+            rbot_ = Variable("", hor_dim, ""),
+            zbot_ = Variable("", hor_dim, ""),
+            thbot_ = Variable("", hor_dim, "")
+        ) 
 
     def _read_forcing(self, var):
         with h5netcdf.File(DATA_FILES["forcing"], "r") as infile:
@@ -560,8 +572,14 @@ class GlobalFourDegreeSetup(VerosSetup):
             "swr_net", "lwr_dw", "siconc", "maskI", "qnet_forc", "qnec_forc",
             "lwnet", "sen", "lat", "taux_forc", "tauy_forc", "maskT_noI",
             "hIceMean","hSnowMean","Area","uIce","vIce","forc_salt_surface",
-            "qnet_","lwnet_","sen_","lat_",
-            "iceMask","evap","precip","runoff","AreapreTH"]
+            "lwnet_","sen_","lat_",
+            "iceMask","evap","precip","runoff","aqh",
+            "uWind","vWind","uOcean","vOcean",
+            "ATemp","LWdown","SWdown","Qnet_before_ice","Qnet",
+            "ocn_lwnet","ice_lwdw","ice_lwup","ocn_sen","ice_sen","ocn_lat","ice_lat",
+            "rbot_","zbot_","thbot_",
+            "forc_temp_surface",
+            "spres","u","v"]
         state.diagnostics["overturning"].output_frequency = 360 * 86400.0
         state.diagnostics["overturning"].sampling_frequency = settings.dt_tracer
         state.diagnostics["energy"].output_frequency = 360 * 86400.0
@@ -590,8 +608,8 @@ def set_forcing_kernel(state):
         return f1 * field[:, :, n1] + f2 * field[:, :, n2]
 
     # --------------------------------------------------------
-    use_cesm_forcing = False #!!!!!
-    use_mitgcm_forcing = True
+    use_cesm_forcing = True #!!!!!
+    use_mitgcm_forcing = False
 
     spres = f1 * vs.spres[:, :, n1] + f2 * vs.spres[:, :, n2]
     zbot = f1 * vs.zbot[:, :, n1] + f2 * vs.zbot[:, :, n2]
@@ -715,6 +733,11 @@ def set_forcing_kernel(state):
 
     # the salt flux is calculated in the growth routine of versis
 
+    # salinity restoring
+    t_rest = 30 * 86400.0
+    sss = f1 * vs.sss_clim[:, :, n1] + f2 * vs.sss_clim[:, :, n2]
+    vs.forc_salt_surface = 1.0 / t_rest * (sss - vs.salt[:, :, -1, vs.tau]) * vs.maskT[:, :, -1] * vs.dzt[-1]
+
 
     ##### versis #####
 
@@ -730,14 +753,55 @@ def set_forcing_kernel(state):
     vs.evap      = current_value(vs.evap_f)
     vs.surfPress = current_value(vs.surfPress_f)
 
+
+    ### calculate thermodynamic ice growth ###
+
+    Qnet_before_ice = qnet
+
+
+    # hIceMean, hSnowMean, Area, TSurf, saltflux, EmPmR, vs.forc_salt_surface, Qsw, Qnet, \
+    #     SeaIceLoad, IcePenetSW = calc_growth(state,vs)
+
+    # vs.forc_temp_surface = - Qnet / ( settings.cpWater * settings.rhoSea )
+
+    vs.forc_temp_surface = update(vs.forc_temp_surface, at[:,:], -3.730053e-05)
+
+
+    # apply simple ice mask
+    mask = npx.logical_and(vs.temp[:, :, -1, vs.tau] * vs.maskT[:, :, -1] < -1.8, vs.forc_temp_surface < 0.0)
+    vs.forc_temp_surface = npx.where(mask, 0.0, vs.forc_temp_surface)
+    vs.forc_salt_surface = npx.where(mask, 0.0, vs.forc_salt_surface)
+
+
+
     if use_cesm_forcing and not use_mitgcm_forcing:
         KO = KernelOutput(
+            # hIceMean = hIceMean,
+            # hSnowMean = hSnowMean,
+            # Area = Area,
+            # TSurf = TSurf,
+            # saltflux = saltflux,
+            # EmPmR = EmPmR,
+            # Qsw = Qsw,
+            # Qnet = Qnet,
+            # SeaIceLoad = SeaIceLoad,
+            # IcePenetSW = IcePenetSW,
+            rbot_ = rbot,
+            zbot_ = zbot,
+            thbot_ = thbot,
+            ocn_lwnet = ocn_lwnet,
+            ice_lwdw = ice_lwdw,
+            ice_lwup = ice_lwup,
+            ocn_sen = ocn_sen,
+            ice_sen = ice_sen,
+            ocn_lat = ocn_lat,
+            ice_lat = ice_lat,
+            Qnet_before_ice = Qnet_before_ice,
             qnet_forc=qnet,
             qnec_forc=qnec,
             lwnet=ocn_lwnet+ice_lwdw+ice_lwup,
             sen=ocn_sen+ice_sen,
             lat=ocn_lat+ice_lat,
-            qnet_ = qnet,
             lwnet_ = ocn_lwnet+ice_lwdw+ice_lwup,
             sen_ = ocn_sen+ice_sen,
             lat_ = ocn_lat+ice_lat,
@@ -763,12 +827,22 @@ def set_forcing_kernel(state):
         )
     elif not use_cesm_forcing and use_mitgcm_forcing:
         KO = KernelOutput(
+            hIceMean = hIceMean,
+            hSnowMean = hSnowMean,
+            Area = Area,
+            TSurf = TSurf,
+            saltflux = saltflux,
+            EmPmR = EmPmR,
+            Qsw = Qsw,
+            Qnet = Qnet,
+            SeaIceLoad = SeaIceLoad,
+            IcePenetSW = IcePenetSW,
+            Qnet_before_ice = Qnet_before_ice,
             qnet_forc=qnet,
             qnec_forc=qnec,
             lwnet=lwr_dw-lwup,
             sen=sen,
             lat=lat,
-            qnet_ = qnet,
             lwnet_ = lwr_dw-lwup,
             sen_ = sen,
             lat_ = lat,
@@ -794,9 +868,19 @@ def set_forcing_kernel(state):
         )
     else:
         KO = KernelOutput(
+            hIceMean = hIceMean,
+            hSnowMean = hSnowMean,
+            Area = Area,
+            TSurf = TSurf,
+            saltflux = saltflux,
+            EmPmR = EmPmR,
+            Qsw = Qsw,
+            Qnet = Qnet,
+            SeaIceLoad = SeaIceLoad,
+            IcePenetSW = IcePenetSW,
+            Qnet_before_ice = Qnet_before_ice,
             qnet_forc=qnet,
             qnec_forc=qnec,
-            qnet_ = qnet,
             surface_taux=vs.surface_taux,
             surface_tauy=vs.surface_tauy,
             forc_tke_surface=vs.forc_tke_surface,
