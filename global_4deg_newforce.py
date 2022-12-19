@@ -58,6 +58,7 @@ class GlobalFourDegreeSetup(VerosSetup):
 
     min_depth = 10.0
     max_depth = 5400.0
+    fine_z = False
 
     @veros_routine
     def set_parameter(self, state):
@@ -65,8 +66,10 @@ class GlobalFourDegreeSetup(VerosSetup):
 
         settings.identifier = "4deg"
 
-        settings.nx, settings.ny, settings.nz = 90, 40, 40 # ront
-        #settings.nx, settings.ny, settings.nz = 90, 40, 15
+        if self.fine_z:
+            settings.nx, settings.ny, settings.nz = 90, 40, 40 # ront
+        else:
+            settings.nx, settings.ny, settings.nz = 90, 40, 15
 
         settings.dt_mom = 1800.0
         settings.dt_tracer = 86400.0
@@ -262,12 +265,14 @@ class GlobalFourDegreeSetup(VerosSetup):
     @veros_routine
     def set_grid(self, state):
         vs = state.variables
-        settings = state.settings # ront
-        vs.dzt = veros.tools.get_vinokur_grid_steps(settings.nz, self.max_depth, self.min_depth, refine_towards='lower') #ront
-        #ddz = npx.array(
-        #    [50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0] 
-        #)
-        #vs.dzt = ddz[::-1]
+        if self.fine_z:
+            settings = state.settings # ront
+            vs.dzt = veros.tools.get_vinokur_grid_steps(settings.nz, self.max_depth, self.min_depth, refine_towards='lower') #ront
+        else:
+            ddz = npx.array(
+                [50.0, 70.0, 100.0, 140.0, 190.0, 240.0, 290.0, 340.0, 390.0, 440.0, 490.0, 540.0, 590.0, 640.0, 690.0] 
+            )
+            vs.dzt = ddz[::-1]
         vs.dxt = 4.0 * npx.ones_like(vs.dxt)
         vs.dyt = 4.0 * npx.ones_like(vs.dyt)
 
@@ -291,7 +296,12 @@ class GlobalFourDegreeSetup(VerosSetup):
         salt_interp = veros.tools.interpolate((vs.xt[2:-2], vs.yt[2:-2], zt_forc), salt_data,
                                               (vs.xt[2:-2], vs.yt[2:-2], vs.zt), kind="nearest") #ront
 
-        land_mask = (vs.zt[npx.newaxis, npx.newaxis, :] <= bathymetry_data[..., npx.newaxis]) | (salt_interp == 0.0) # ront
+        if self.fine_z:
+            salt = salt_interp
+        else:
+            salt = salt_data
+
+        land_mask = (vs.zt[npx.newaxis, npx.newaxis, :] <= bathymetry_data[..., npx.newaxis]) | (salt == 0.0) # ront
 
         vs.kbot = update(vs.kbot, at[2:-2, 2:-2], 1 + npx.sum(land_mask.astype("int"), axis=2))
 
@@ -363,15 +373,23 @@ class GlobalFourDegreeSetup(VerosSetup):
         temp_data = self._read_forcing("temperature")[:, :, ::-1]
         temp_interp = veros.tools.interpolate((vs.xt[2:-2], vs.yt[2:-2], zt_forc), temp_data,
                                               (vs.xt[2:-2], vs.yt[2:-2], vs.zt), kind="nearest") #ront
+        if self.fine_z:
+            temp = temp_interp
+        else:
+            temp = temp_data
         vs.temp = update(
-            vs.temp, at[2:-2, 2:-2, :, :2], temp_interp[:, :, :, npx.newaxis] * vs.maskT[2:-2, 2:-2, :, npx.newaxis] # ront
+            vs.temp, at[2:-2, 2:-2, :, :2], temp[:, :, :, npx.newaxis] * vs.maskT[2:-2, 2:-2, :, npx.newaxis] # ront
         )
 
         salt_data = self._read_forcing("salinity")[:, :, ::-1]
         salt_interp = veros.tools.interpolate((vs.xt[2:-2], vs.yt[2:-2], zt_forc), salt_data,
                                               (vs.xt[2:-2], vs.yt[2:-2], vs.zt), kind="nearest") #ront
+        if self.fine_z:
+            salt = salt_interp
+        else:
+            salt = salt_data
         vs.salt = update(
-            vs.salt, at[2:-2, 2:-2, :, :2], salt_interp[..., npx.newaxis] * vs.maskT[2:-2, 2:-2, :, npx.newaxis] # ront
+            vs.salt, at[2:-2, 2:-2, :, :2], salt[..., npx.newaxis] * vs.maskT[2:-2, 2:-2, :, npx.newaxis] # ront
         )
 
         # use Trenberth wind stress from MITgcm instead of ECMWF (also contained in ecmwf_4deg.cdf)
@@ -764,7 +782,7 @@ def set_forcing_kernel(state):
 
     # vs.forc_temp_surface = - Qnet / ( settings.cpWater * settings.rhoSea )
 
-    vs.forc_temp_surface = update(vs.forc_temp_surface, at[:,:], -3.730053e-05)
+    # vs.forc_temp_surface = update(vs.forc_temp_surface, at[:,:], -3.730053e-05)
 
 
     # apply simple ice mask
