@@ -185,7 +185,10 @@ class GlobalFourDegreeSetup(VerosSetup):
             ice_lat = Variable("", hor_dim, ""),
             rbot_ = Variable("", hor_dim, ""),
             zbot_ = Variable("", hor_dim, ""),
-            thbot_ = Variable("", hor_dim, "")
+            thbot_ = Variable("", hor_dim, ""),
+            forc_salt_surface_ice = Variable("", hor_dim, ""),
+            forc_salt_surface_res = Variable("", hor_dim, ""),
+            sss = Variable("", hor_dim, "")
         ) 
 
     def _read_forcing(self, var):
@@ -591,13 +594,13 @@ class GlobalFourDegreeSetup(VerosSetup):
             "lwnet", "sen", "lat", "taux_forc", "tauy_forc", "maskT_noI",
             "hIceMean","hSnowMean","Area","uIce","vIce","forc_salt_surface",
             "lwnet_","sen_","lat_",
-            "iceMask","evap","precip","runoff","aqh",
+            "iceMask","evap","precip","runoff","aqh","snowfall",
             "uWind","vWind","uOcean","vOcean",
             "ATemp","LWdown","SWdown","Qnet_before_ice","Qnet",
             "ocn_lwnet","ice_lwdw","ice_lwup","ocn_sen","ice_sen","ocn_lat","ice_lat",
             "rbot_","zbot_","thbot_",
-            "forc_temp_surface",
-            "spres","u","v"]
+            "forc_temp_surface","forc_salt_surface_ice","forc_salt_surface_res","sss",
+            "spres","u","v","TSurf"]
         state.diagnostics["overturning"].output_frequency = 360 * 86400.0
         state.diagnostics["overturning"].sampling_frequency = settings.dt_tracer
         state.diagnostics["energy"].output_frequency = 360 * 86400.0
@@ -626,8 +629,8 @@ def set_forcing_kernel(state):
         return f1 * field[:, :, n1] + f2 * field[:, :, n2]
 
     # --------------------------------------------------------
-    use_cesm_forcing = True #!!!!!
-    use_mitgcm_forcing = False
+    use_cesm_forcing = False #!!!!!
+    use_mitgcm_forcing = True
 
     spres = f1 * vs.spres[:, :, n1] + f2 * vs.spres[:, :, n2]
     zbot = f1 * vs.zbot[:, :, n1] + f2 * vs.zbot[:, :, n2]
@@ -642,7 +645,7 @@ def set_forcing_kernel(state):
     lwr_dw = f1 * vs.lwr_dw[:, :, n1] + f2 * vs.lwr_dw[:, :, n2]
     maskI = f1 * vs.maskI[:, :, n1] + f2 * vs.maskI[:, :, n2]
 
-    maskI = npx.where(vs.Area > 0.5, 1, 0)
+    maskI = npx.zeros_like(vs.Area) #TODO maybe use Area > 0
 
     maskT_noI = npx.where(maskI == 1, 0, vs.maskT[:, :, -1])
     temp = vs.temp[:, :, -1, vs.tau] + 273.12
@@ -661,7 +664,7 @@ def set_forcing_kernel(state):
         ice_sen, ice_lat, ice_lwup, _, ice_taux, ice_tauy, _, _,\
             _, _, _ = \
             flux_cesm.flux_atmIce(maskI, rbot, zbot, ubot, vbot, qbot, tbot, thbot,
-                                  temp) # replace vs.temp with sea-ice temperature
+                                  temp)
         # Net LW radiation flux from sea surface
         ocn_lwnet = flux_cesm.net_lw_ocn(state, maskT_noI, vs.yt[:], qbot,
                                          temp, tbot, tcc)
@@ -754,7 +757,7 @@ def set_forcing_kernel(state):
     # salinity restoring
     t_rest = 30 * 86400.0
     sss = f1 * vs.sss_clim[:, :, n1] + f2 * vs.sss_clim[:, :, n2]
-    vs.forc_salt_surface = 1.0 / t_rest * (sss - vs.salt[:, :, -1, vs.tau]) * vs.maskT[:, :, -1] * vs.dzt[-1]
+    forc_salt_surface_res = 1.0 / t_rest * (sss - vs.salt[:, :, -1, vs.tau]) * vs.maskT[:, :, -1] * vs.dzt[-1]
 
 
     ##### versis #####
@@ -776,34 +779,35 @@ def set_forcing_kernel(state):
 
     Qnet_before_ice = qnet
 
-
-    # hIceMean, hSnowMean, Area, TSurf, saltflux, EmPmR, vs.forc_salt_surface, Qsw, Qnet, \
-    #     SeaIceLoad, IcePenetSW = calc_growth(state,vs)
-
-    # vs.forc_temp_surface = - Qnet / ( settings.cpWater * settings.rhoSea )
-
-    # vs.forc_temp_surface = update(vs.forc_temp_surface, at[:,:], -3.730053e-05)
+    hIceMean, hSnowMean, Area, TSurf, saltflux, EmPmR, forc_salt_surface_ice, Qsw, Qnet, \
+        SeaIceLoad, IcePenetSW = calc_growth(state,vs)
 
 
     # apply simple ice mask
-    mask = npx.logical_and(vs.temp[:, :, -1, vs.tau] * vs.maskT[:, :, -1] < -1.8, vs.forc_temp_surface < 0.0)
+    mask = npx.logical_and(vs.temp[:, :, -1, vs.tau] * vs.maskT[:, :, -1] < -2, vs.forc_temp_surface < 0.0)
     vs.forc_temp_surface = npx.where(mask, 0.0, vs.forc_temp_surface)
-    vs.forc_salt_surface = npx.where(mask, 0.0, vs.forc_salt_surface)
+    vs.forc_salt_surface = npx.where(mask, 0.0, forc_salt_surface_res)
 
+    # # vs.forc_salt_surface = forc_salt_surface_ice - 1e-5
+    # vs.forc_salt_surface = forc_salt_surface_ice
+    # vs.forc_temp_surface = - vs.Qnet / ( settings.cpWater * settings.rhoSea )
 
 
     if use_cesm_forcing and not use_mitgcm_forcing:
         KO = KernelOutput(
-            # hIceMean = hIceMean,
-            # hSnowMean = hSnowMean,
-            # Area = Area,
-            # TSurf = TSurf,
-            # saltflux = saltflux,
-            # EmPmR = EmPmR,
-            # Qsw = Qsw,
-            # Qnet = Qnet,
-            # SeaIceLoad = SeaIceLoad,
-            # IcePenetSW = IcePenetSW,
+            hIceMean = hIceMean,
+            hSnowMean = hSnowMean,
+            Area = Area,
+            TSurf = TSurf,
+            saltflux = saltflux,
+            EmPmR = EmPmR,
+            Qsw = Qsw,
+            Qnet = Qnet,
+            SeaIceLoad = SeaIceLoad,
+            IcePenetSW = IcePenetSW,
+            forc_salt_surface_ice = forc_salt_surface_ice,
+            forc_salt_surface_res = forc_salt_surface_res,
+            sss = sss,
             rbot_ = rbot,
             zbot_ = zbot,
             thbot_ = thbot,
