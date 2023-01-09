@@ -169,13 +169,9 @@ class GlobalFourDegreeSetup(VerosSetup):
             evap_f = Variable("Evaporation", forc_dim, "m"),
             surfPress_f = Variable("Surface pressure", forc_dim, "P"),
             #
-            Qnet_before_ice = Variable("Qnet before ice growth", hor_dim, "W/m2"),
             ocn_lwnet = Variable("", hor_dim, ""),
             ocn_sen = Variable("", hor_dim, ""),
             ocn_lat = Variable("", hor_dim, ""),
-            rbot_ = Variable("", hor_dim, ""),
-            zbot_ = Variable("", hor_dim, ""),
-            thbot_ = Variable("", hor_dim, ""),
             forc_salt_surface_ice = Variable("", hor_dim, ""),
             forc_salt_surface_res = Variable("", hor_dim, ""),
             sss = Variable("", hor_dim, "")
@@ -579,14 +575,12 @@ class GlobalFourDegreeSetup(VerosSetup):
             "swr_net", "lwr_dw", "qnet_forc", "qnec_forc",
             "lwnet", "sen", "lat", "taux_forc", "tauy_forc",
             "hIceMean","hSnowMean","Area","uIce","vIce","forc_salt_surface",
-            "lwnet_","sen_","lat_",
-            "iceMask","evap","precip","runoff","aqh","snowfall",
             "uWind","vWind","uOcean","vOcean",
-            "ATemp","LWdown","SWdown","Qnet_before_ice","Qnet",
+            "ATemp","LWdown","SWdown","Qnet",
             "ocn_lwnet","ocn_sen","ocn_lat",
-            "rbot_","zbot_","thbot_",
             "forc_temp_surface","forc_salt_surface_ice","forc_salt_surface_res","sss",
-            "spres","u","v","TSurf"]
+            "u","v","TSurf",
+            "SeaIceLoad","IcePenetSW"]
         state.diagnostics["overturning"].output_frequency = 360 * 86400.0
         state.diagnostics["overturning"].sampling_frequency = settings.dt_tracer
         state.diagnostics["energy"].output_frequency = 360 * 86400.0
@@ -607,6 +601,9 @@ def set_forcing_kernel(state):
     vs = state.variables
     settings = state.settings
 
+    use_cesm_forcing = False
+    use_mitgcm_forcing = True
+
     year_in_seconds = 360 * 86400.0
     (n1, f1), (n2, f2) = veros.tools.get_periodic_interval(vs.time, year_in_seconds, year_in_seconds / 12.0, 12)
 
@@ -614,56 +611,56 @@ def set_forcing_kernel(state):
     def current_value(field):
         return f1 * field[:, :, n1] + f2 * field[:, :, n2]
 
-    # --------------------------------------------------------
-    use_cesm_forcing = False #!!!!!
-    use_mitgcm_forcing = True
-
-    spres = f1 * vs.spres[:, :, n1] + f2 * vs.spres[:, :, n2]
-    zbot = f1 * vs.zbot[:, :, n1] + f2 * vs.zbot[:, :, n2]
-    ubot = f1 * vs.ubot[:, :, n1] + f2 * vs.ubot[:, :, n2]
-    vbot = f1 * vs.vbot[:, :, n1] + f2 * vs.vbot[:, :, n2]
-    tcc = f1 * vs.tcc[:, :, n1] + f2 * vs.tcc[:, :, n2]
-    qbot = f1 * vs.qbot[:, :, n1] + f2 * vs.qbot[:, :, n2]
-    rbot = f1 * vs.rbot[:, :, n1] + f2 * vs.rbot[:, :, n2]
-    tbot = f1 * vs.tbot[:, :, n1] + f2 * vs.tbot[:, :, n2]
-    thbot = f1 * vs.thbot[:, :, n1] + f2 * vs.thbot[:, :, n2]
-    swr_net = f1 * vs.swr_net[:, :, n1] + f2 * vs.swr_net[:, :, n2]
-    lwr_dw = f1 * vs.lwr_dw[:, :, n1] + f2 * vs.lwr_dw[:, :, n2]
+    spres   = current_value(vs.spres)
+    zbot    = current_value(vs.zbot)
+    ubot    = current_value(vs.ubot)
+    vbot    = current_value(vs.vbot)
+    tcc     = current_value(vs.tcc)
+    qbot    = current_value(vs.qbot)
+    rbot    = current_value(vs.rbot)
+    tbot    = current_value(vs.tbot)
+    thbot   = current_value(vs.thbot)
+    swr_net = current_value(vs.swr_net)
+    lwr_dw  = current_value(vs.lwr_dw)
 
     ocn_mask =  vs.maskT[:, :, -1]
     temp = vs.temp[:, :, -1, vs.tau] + 273.12
 
+
     if use_cesm_forcing and not use_mitgcm_forcing:
         # ocean net surface heat flux
-        ocn_sen, ocn_lat, ocn_lwup, _, ocn_taux, ocn_tauy, _, _, _,\
-            _, _, _ = \
+        ocn_sen, ocn_lat, ocn_lwup, _, ocn_taux, ocn_tauy, _, _, _, _, _, _ = \
             flux_cesm.flux_atmOcn(ocn_mask, rbot, zbot, ubot, vbot, qbot, tbot, thbot,
                                     vs.u[:, :, -1, vs.tau], vs.v[:, :, -1, vs.tau], temp)
 
         # Net LW radiation flux from sea surface
         ocn_lwnet = flux_cesm.net_lw_ocn(state, ocn_mask, vs.yt[:], qbot, temp, tbot, tcc)
 
+        # different/ simpler formula for the surface heat flux
         qir, qh, qe = flux_cesm.flux_atmOcnIce(ocn_mask, spres, qbot, rbot, ubot, vbot, tbot,
-                                               vs.u[:, :, -1, vs.tau], vs.v[:, :, -1, vs.tau],
-                                               temp)
+                                                vs.u[:, :, -1, vs.tau], vs.v[:, :, -1, vs.tau],
+                                                temp)
 
-        #qnet_simple_new = swr_net + qir + lwr_dw + qh + qe
+        # qnet_simple = swr_net + qir + lwr_dw + qh + qe
 
         dqir_dt, dqh_dt, dqe_dt = flux_cesm.dqnetdt(ocn_mask, spres, rbot, temp,
                                                     ubot, vbot, vs.u[:, :, -1, vs.tau],
                                                     vs.v[:, :, -1, vs.tau])
-        # --------------------------------------------------------
-    elif not use_cesm_forcing and use_mitgcm_forcing:
 
-        u10m = f1 * vs.u10m[:, :, n1] + f2 * vs.u10m[:, :, n2]
-        v10m = f1 * vs.v10m[:, :, n1] + f2 * vs.v10m[:, :, n2]
-        q10m = f1 * vs.q10m[:, :, n1] + f2 * vs.q10m[:, :, n2]
-        t2m = f1 * vs.t2m[:, :, n1] + f2 * vs.t2m[:, :, n2]
+
+    elif not use_cesm_forcing and use_mitgcm_forcing:
+        u10m = current_value(vs.u10m)
+        v10m = current_value(vs.v10m)
+        q10m = current_value(vs.q10m)
+        t2m  = current_value(vs.t2m)
 
         lwup, lat, sen, qnec, taux, tauy, _, _, _\
             = flux_mitgcm.bulkf_formula_lanl(u10m, v10m, t2m, q10m, temp, ocn_mask)
+
     else:
         pass
+
+
     # wind stress
     #if use_cesm_forcing and not use_mitgcm_forcing:
     #    vs.surface_taux = ocn_taux + ice_taux
@@ -674,6 +671,7 @@ def set_forcing_kernel(state):
     #else:
     vs.surface_taux = f1 * vs.taux[:, :, n1] + f2 * vs.taux[:, :, n2]
     vs.surface_tauy = f1 * vs.tauy[:, :, n1] + f2 * vs.tauy[:, :, n2]
+
 
     # tke flux
     if settings.enable_tke:
@@ -686,8 +684,9 @@ def set_forcing_kernel(state):
             )
             ** 1.5,
         )
-    #
-    # heat flux : W/m^2 K kg/J m^3/kg = K m/s
+
+
+    # heat flux [W/m^2 K kg/J m^3/kg] = [K m/s]
     cp_0 = 3991.86795711963
     sst = f1 * vs.sst_clim[:, :, n1] + f2 * vs.sst_clim[:, :, n2]
     swr_net = swr_net * (1. - ct.OCEAN_ALBEDO)
@@ -713,8 +712,6 @@ def set_forcing_kernel(state):
     vs.forc_temp_surface = update(vs.forc_temp_surface, at[2:-2,2:-2], forc_temp_surface[2:-2,2:-2])
 
 
-    # the salt flux is calculated in the growth routine of versis
-
     # salinity restoring
     t_rest = 30 * 86400.0
     sss = f1 * vs.sss_clim[:, :, n1] + f2 * vs.sss_clim[:, :, n2]
@@ -737,8 +734,6 @@ def set_forcing_kernel(state):
 
 
     ### calculate thermodynamic ice growth ###
-
-    Qnet_before_ice = qnet
 
     hIceMean, hSnowMean, Area, TSurf, saltflux, EmPmR, forc_salt_surface_ice, Qsw, Qnet, \
         SeaIceLoad, IcePenetSW = calc_growth(state,vs)
@@ -769,13 +764,9 @@ def set_forcing_kernel(state):
             forc_salt_surface_ice = forc_salt_surface_ice,
             forc_salt_surface_res = forc_salt_surface_res,
             sss = sss,
-            rbot_ = rbot,
-            zbot_ = zbot,
-            thbot_ = thbot,
             ocn_lwnet = ocn_lwnet,
             ocn_sen = ocn_sen,
             ocn_lat = ocn_lat,
-            Qnet_before_ice = Qnet_before_ice,
             qnet_forc=qnet,
             qnec_forc=qnec,
             taux_forc=ocn_taux,
@@ -809,15 +800,11 @@ def set_forcing_kernel(state):
             Qnet = Qnet,
             SeaIceLoad = SeaIceLoad,
             IcePenetSW = IcePenetSW,
-            Qnet_before_ice = Qnet_before_ice,
             qnet_forc=qnet,
             qnec_forc=qnec,
             lwnet=lwr_dw-lwup,
             sen=sen,
             lat=lat,
-            lwnet_ = lwr_dw-lwup,
-            sen_ = sen,
-            lat_ = lat,
             taux_forc=taux,
             tauy_forc=tauy,
             surface_taux=vs.surface_taux,
@@ -849,7 +836,6 @@ def set_forcing_kernel(state):
             Qnet = Qnet,
             SeaIceLoad = SeaIceLoad,
             IcePenetSW = IcePenetSW,
-            Qnet_before_ice = Qnet_before_ice,
             qnet_forc=qnet,
             qnec_forc=qnec,
             surface_taux=vs.surface_taux,
